@@ -111,7 +111,11 @@ async def add_keywords_from_preset(
     payload: PresetMutationRequest,
     tenant_id: TenantId,
 ) -> PublicWatchlist:
-    """Copy an enabled preset's normalized keywords into an owned watchlist."""
+    """Copy an enabled preset's normalized keywords into an owned watchlist.
+
+    The copy is all-or-nothing: if the deduplicated post-image would exceed the
+    tenant keyword cap, the whole request is rejected and the watchlist is unchanged.
+    """
     await _require_owned_watchlist(watchlist_id, tenant_id)
     preset = await database.get_enabled_preset_keyword_by_id(payload.preset_id)
     if preset is None:
