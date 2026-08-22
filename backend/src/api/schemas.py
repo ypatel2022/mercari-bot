@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from ..alert_deliveries import AlertDeliveryRecord
+from ..config import settings
 from ..destinations import DestinationRecord, DestinationType
 from ..presets import PresetKeywordRecord
 from ..watchlists import WatchlistCondition, WatchlistRecord
@@ -16,6 +17,12 @@ BoundedName = Annotated[str, Field(min_length=1, max_length=120)]
 BoundedKeyword = Annotated[str, Field(min_length=1, max_length=200)]
 ResourceId = Annotated[str, Field(min_length=1, max_length=200)]
 WebhookUrl = Annotated[str, Field(min_length=1, max_length=2048)]
+
+
+def _bound_request_keyword_list(keywords: list[str]) -> list[str]:
+    if len(keywords) > settings.max_keywords_per_request:
+        raise ValueError("keyword list exceeds the per-request bound")
+    return keywords
 
 
 class StrictRequest(BaseModel):
@@ -70,6 +77,12 @@ class WatchlistCreateRequest(StrictRequest):
     destination_id: ResourceId
     enabled: StrictBool = True
 
+    @field_validator("keywords")
+    @classmethod
+    def bound_keyword_list_length(cls, keywords: list[str]) -> list[str]:
+        """Reject keyword arrays longer than ``max_keywords_per_request``."""
+        return _bound_request_keyword_list(keywords)
+
 
 class WatchlistUpdateRequest(StrictRequest):
     """Allowlisted partial watchlist mutation."""
@@ -79,6 +92,14 @@ class WatchlistUpdateRequest(StrictRequest):
     filters: WatchlistFiltersRequest | None = None
     destination_id: ResourceId | None = None
     enabled: StrictBool | None = None
+
+    @field_validator("keywords")
+    @classmethod
+    def bound_keyword_list_length(cls, keywords: list[str] | None) -> list[str] | None:
+        """Reject keyword arrays longer than ``max_keywords_per_request``."""
+        if keywords is None:
+            return None
+        return _bound_request_keyword_list(keywords)
 
     @model_validator(mode="after")
     def validate_patch(self) -> Self:

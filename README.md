@@ -16,3 +16,7 @@ uv run python -m src.api_main
 ```
 
 ## Currently INFRA and WEB are being developed.
+
+## Limits
+
+Stored watchlist keywords are capped per user (`MAX_KEYWORDS_PER_USER`, default 100), counting every watchlist including disabled ones. A single create or replace request may include at most `MAX_KEYWORDS_PER_REQUEST` keywords (default 50). Crossing the stored cap returns `409` with code `keyword_limit_exceeded`.

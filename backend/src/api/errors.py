@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from ..database import KeywordMutationTransactionRequiredError
+from ..database import KeywordLimitExceededError, KeywordMutationTransactionRequiredError
 from ..destinations import (
     DestinationInUseError,
     DestinationLabelExistsError,
@@ -36,6 +36,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         WatchlistNameExistsError,
         _build_error_handler(409, "A watchlist with this name already exists", "watchlist_name_exists"),
+    )
+    app.add_exception_handler(
+        KeywordLimitExceededError,
+        _build_error_handler(409, "Keyword limit reached", "keyword_limit_exceeded"),
     )
     app.add_exception_handler(
         KeywordMutationTransactionRequiredError,

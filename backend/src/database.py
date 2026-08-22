@@ -34,6 +34,7 @@ from .keyword_registry import (
     build_registry_id,
     normalize_registry_keyword,
 )
+from .limits import resolve_tenant_limits
 from .listings import ListingRecord, Marketplace
 from .presets import PresetKeywordRecord, PresetNameExistsError, PresetNotFoundError
 from .users import EmailAlreadyExistsError, UserPlan, UserRecord, UserStatus, normalize_email
@@ -57,6 +58,10 @@ _active_keyword_session: ContextVar[Any | None] = ContextVar("_active_keyword_se
 
 class KeywordMutationTransactionRequiredError(Exception):
     """Raised when keyword mutations cannot run inside a MongoDB transaction."""
+
+
+class KeywordLimitExceededError(Exception):
+    """Raised when a keyword mutation would exceed the tenant keyword cap."""
 
 
 class _EmulatedMongoSession:
@@ -273,6 +278,29 @@ async def _run_keyword_mutation(mutator: Callable[[Any], Awaitable[T]]) -> T:
     raise last_error
 
 
+async def _count_stored_keywords_for_owner(
+    owner_id: str,
+    *,
+    session: Any,
+    exclude_watchlist_id: str | None = None,
+) -> int:
+    query: dict[str, Any] = {"owner_id": owner_id}
+    if exclude_watchlist_id is not None:
+        query["_id"] = {"$ne": exclude_watchlist_id}
+    documents = await db_client.watchlists.find(query, **_session_kwargs(session)).to_list(length=None)
+    return sum(len(normalize_keywords(list(document.get("keywords") or []))) for document in documents)
+
+
+async def _enforce_tenant_keyword_cap(owner_id: str, *, session: Any, prospective_total: int) -> None:
+    user_document = await db_client.users.find_one({"_id": owner_id}, **_session_kwargs(session))
+    user_plan = UserPlan.FREE.value
+    if user_document is not None:
+        user_plan = str(user_document.get("plan", user_plan))
+    cap = resolve_tenant_limits(user_plan).max_keywords_per_user
+    if prospective_total > cap:
+        raise KeywordLimitExceededError()
+
+
 def _active_keywords(watchlist: WatchlistRecord | None) -> list[str]:
     if watchlist is None or not watchlist.enabled:
         return []
@@ -318,7 +346,18 @@ async def _apply_watchlist_field_update(
     if name is not None:
         update_document["name"] = normalize_watchlist_name(name)
     if keywords is not None:
-        update_document["keywords"] = normalize_keywords(keywords)
+        normalized_keywords = normalize_keywords(keywords)
+        other_count = await _count_stored_keywords_for_owner(
+            previous.owner_id,
+            session=session,
+            exclude_watchlist_id=previous._id,
+        )
+        await _enforce_tenant_keyword_cap(
+            previous.owner_id,
+            session=session,
+            prospective_total=other_count + len(normalized_keywords),
+        )
+        update_document["keywords"] = normalized_keywords
     if filters is not None:
         update_document["filters"] = _coerce_watchlist_filters(filters).to_document()
     if destination_id is not None:
@@ -422,6 +461,12 @@ async def create_watchlist(
             enabled=enabled,
             created_at=created_at,
         )
+        other_count = await _count_stored_keywords_for_owner(owner_id, session=session)
+        await _enforce_tenant_keyword_cap(
+            owner_id,
+            session=session,
+            prospective_total=other_count + len(watchlist.keywords),
+        )
         try:
             await db_client.watchlists.insert_one(watchlist.to_document(), **_session_kwargs(session))
         except DuplicateKeyError as exc:
@@ -519,6 +564,17 @@ async def add_watchlist_keywords_for_owner(
         if previous_document is None:
             raise WatchlistNotFoundError(watchlist_id)
         previous = _document_to_watchlist(previous_document)
+        merged_keywords = normalize_keywords([*previous.keywords, *normalized_keywords])
+        other_count = await _count_stored_keywords_for_owner(
+            owner_id,
+            session=session,
+            exclude_watchlist_id=watchlist_id,
+        )
+        await _enforce_tenant_keyword_cap(
+            owner_id,
+            session=session,
+            prospective_total=other_count + len(merged_keywords),
+        )
         document = await db_client.watchlists.find_one_and_update(
             selector,
             {
